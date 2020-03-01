@@ -31,6 +31,9 @@ pub struct Kernel {
     work: Cell<usize>,
     /// This holds a pointer to the static array of Process pointers.
     processes: &'static [Option<&'static dyn process::ProcessType>],
+
+    /// Process index to be scheduled next according to Round Robin
+    next_up: Cell<usize>,
     /// How many grant regions have been setup. This is incremented on every
     /// call to `create_grant()`. We need to explicitly track this so that when
     /// processes are created they can allocated pointers for each grant.
@@ -47,6 +50,7 @@ impl Kernel {
         Kernel {
             work: Cell::new(0),
             processes: processes,
+            next_up: Cell::new(0),
             grant_counter: Cell::new(0),
             grants_finalized: Cell::new(false),
         }
@@ -215,16 +219,32 @@ impl Kernel {
                 chip.service_pending_interrupts();
                 DynamicDeferredCall::call_global_instance_while(|| !chip.has_pending_interrupts());
 
-                for p in self.processes.iter() {
-                    p.map(|process| {
-                        self.do_process(platform, chip, process, ipc);
-                    });
-                    if chip.has_pending_interrupts()
-                        || DynamicDeferredCall::global_instance_calls_pending().unwrap_or(false)
-                    {
-                        break;
+                self.processes[self.next_up.get()].map(|process| {
+                    let timeslice_us = KERNEL_TICK_DURATION_US - process.get_timeslice_use();
+                    self.do_process(platform, chip, process, ipc, timeslice_us);
+                    0
+                });
+                match self.processes[self.next_up.get()] {
+                    Some(process) => {
+                        // if this is non-zero, it means there is some time slice remaining
+                        // left by the process that just executed.
+                        if process.get_timeslice_use() == 0 {
+                            self.next_up.increment();
+                        }
+                    }
+                    None => {
+                        self.next_up.increment();
                     }
                 }
+
+                if self.next_up.get() == self.processes.len() {
+                    self.next_up.set(0);
+                }
+                // if chip.has_pending_interrupts()
+                //     || DynamicDeferredCall::global_instance_calls_pending().unwrap_or(false)
+                // {
+                //     break;
+                // }
 
                 chip.atomic(|| {
                     if !chip.has_pending_interrupts()
@@ -244,6 +264,7 @@ impl Kernel {
         chip: &C,
         process: &dyn process::ProcessType,
         ipc: Option<&crate::ipc::IPC>,
+        proc_timeslice_us: u32,
     ) {
         let appid = process.appid();
         let systick = chip.systick();
@@ -270,9 +291,10 @@ impl Kernel {
                     chip.mpu().enable_mpu();
                     systick.enable(true);
                     let context_switch_reason = process.switch_to();
+                    let us_used = proc_timeslice_us - systick.get_value();
                     systick.enable(false);
                     chip.mpu().disable_mpu();
-
+                    process.set_timeslice_use(0);
                     // Now the process has returned back to the kernel. Check
                     // why and handle the process as appropriate.
                     match context_switch_reason {
@@ -418,7 +440,8 @@ impl Kernel {
                             break;
                         }
                         Some(ContextSwitchReason::Interrupted) => {
-                            // break to handle other processes.
+                            // break to handle other processes but save remaining slice to be rescheduled.
+                            process.set_timeslice_use(process.get_timeslice_use() + us_used);
                             break;
                         }
                         None => {

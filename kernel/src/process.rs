@@ -127,6 +127,10 @@ pub trait ProcessType {
     /// Move this process from the running state to the yielded state.
     fn set_yielded_state(&self);
 
+    fn set_timeslice_use(&self, used: u32);
+
+    fn get_timeslice_use(&self) -> u32;
+
     /// Move this process from running or yielded state into the stopped state
     fn stop(&self);
 
@@ -572,6 +576,9 @@ pub struct Process<'a, C: 'static + Chip> {
     /// Name of the app.
     process_name: &'static str,
 
+    /// amount of current timeslice used by the process
+    us_used_this_timeslice: Cell<u32>,
+
     /// Values kept so that we can print useful debug messages when apps fault.
     debug: MapCell<ProcessDebug>,
 }
@@ -637,6 +644,14 @@ impl<C: Chip> ProcessType for Process<'a, C> {
             self.state.set(State::Yielded);
             self.kernel.decrement_work();
         }
+    }
+
+    fn set_timeslice_use(&self, used: u32) {
+        self.us_used_this_timeslice.set(used);
+    }
+
+    fn get_timeslice_use(&self) -> u32 {
+        self.us_used_this_timeslice.get()
     }
 
     fn stop(&self) {
