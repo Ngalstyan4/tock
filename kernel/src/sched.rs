@@ -221,14 +221,16 @@ impl Kernel {
 
                 self.processes[self.next_up.get()].map(|process| {
                     let timeslice_us = KERNEL_TICK_DURATION_US - process.get_timeslice_use();
-                    self.do_process(platform, chip, process, ipc, timeslice_us);
-                    0
+                    if timeslice_us > MIN_QUANTA_THRESHOLD_US {
+                        self.do_process(platform, chip, process, ipc, timeslice_us);
+                    }
                 });
                 match self.processes[self.next_up.get()] {
                     Some(process) => {
                         // if this is non-zero, it means there is some time slice remaining
                         // left by the process that just executed.
-                        if process.get_timeslice_use() == 0 {
+                        if process.get_timeslice_use() >= KERNEL_TICK_DURATION_US - 2 * MIN_QUANTA_THRESHOLD_US {
+                            process.set_timeslice_use(0);
                             self.next_up.increment();
                         }
                     }
@@ -269,7 +271,7 @@ impl Kernel {
         let appid = process.appid();
         let systick = chip.systick();
         systick.reset();
-        systick.set_timer(KERNEL_TICK_DURATION_US);
+        systick.set_timer(proc_timeslice_us);
         systick.enable(false);
 
         loop {
@@ -291,10 +293,10 @@ impl Kernel {
                     chip.mpu().enable_mpu();
                     systick.enable(true);
                     let context_switch_reason = process.switch_to();
-                    let us_used = proc_timeslice_us - systick.get_value();
                     systick.enable(false);
+                    let us_used = proc_timeslice_us - systick.get_value();
                     chip.mpu().disable_mpu();
-                    process.set_timeslice_use(0);
+                    process.set_timeslice_use(process.get_timeslice_use() + us_used);
                     // Now the process has returned back to the kernel. Check
                     // why and handle the process as appropriate.
                     match context_switch_reason {
@@ -441,7 +443,6 @@ impl Kernel {
                         }
                         Some(ContextSwitchReason::Interrupted) => {
                             // break to handle other processes but save remaining slice to be rescheduled.
-                            process.set_timeslice_use(process.get_timeslice_use() + us_used);
                             break;
                         }
                         None => {
@@ -457,7 +458,10 @@ impl Kernel {
                     // If the process is yielded it might be waiting for a
                     // callback. If there is a task scheduled for this process
                     // go ahead and set the process to execute it.
-                    None => break,
+                    None => {
+                        // yield the remaining timeslice.
+                        process.set_timeslice_use(KERNEL_TICK_DURATION_US);
+                        break;},
                     Some(cb) => match cb {
                         Task::FunctionCall(ccb) => {
                             if config::CONFIG.trace_syscalls {
@@ -493,14 +497,17 @@ impl Kernel {
                     panic!("Attempted to schedule a faulty process");
                 }
                 process::State::StoppedRunning => {
+                    process.set_timeslice_use(KERNEL_TICK_DURATION_US);
                     break;
                     // Do nothing
                 }
                 process::State::StoppedYielded => {
+                    process.set_timeslice_use(KERNEL_TICK_DURATION_US);
                     break;
                     // Do nothing
                 }
                 process::State::StoppedFaulted => {
+                    process.set_timeslice_use(KERNEL_TICK_DURATION_US);
                     break;
                     // Do nothing
                 }
