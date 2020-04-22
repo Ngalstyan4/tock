@@ -1,0 +1,7 @@
+## Round Robin Scheduling.
+
+In Round robin scheduling each process is assigned an equal share `KERNEL_TICK_DURATION_US` of the processor in circular order. 
+
+First let's consider the simple case when there are no interrupts. Here processes are given the CPU in circular order for `KERNEL_TICK_DURATION_US` or until they yield. If a process yields without waiting for any callbacks, the rest of its time quantum is ignored and the process will not be able to use this at a later stage. If, on the other hand, a process yields and there are callbacks for which the process is waiting for, the remaining time quanta will be used to execute its callback in the process context. The scheduler will allocate arbitrarily small time quanta to processes for practical reasons and so if the remaining time quantum of a process is less than `MIN_QUANTA_THRESHOLD_US` , the scheduler will behave as if the process exhausted all of its time quantum.
+
+Interrupts change this picture a little as when they are enabled, interrupt handlers will take the processor out of this circular round robin order. The round robin scheduler in this case makes sure that after the interrupt handler returns, the round robin order of processes is maintained and no process is deprived of a CPU share larger than `MIN_QUANTA_THRESHOLD_US` that they would otherwise receive.
